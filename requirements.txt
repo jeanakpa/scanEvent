@@ -1,0 +1,6 @@
+Flask
+werkzeug
+qrcode
+pyzbar
+Pillow
+uuid
