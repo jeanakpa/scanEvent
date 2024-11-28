@@ -1,4 +1,6 @@
-from flask import Flask, render_template, request, send_file, jsonify, url_for, flash, redirect, session
+
+
+from flask import Flask, render_template, request, send_file, jsonify, url_for, flash, redirect, session, g
 from functools import wraps
 from werkzeug.security import check_password_hash, generate_password_hash
 import sqlite3
@@ -6,15 +8,11 @@ import qrcode
 from io import BytesIO
 from pyzbar.pyzbar import decode
 from PIL import Image
-import sqlite3
-import uuid
-import json
 import os
 import time
-from flask import g
 
 app = Flask(__name__)
-app.secret_key = os.urandom(24)  # Ajout d'une clé secrète pour les sessions
+app.secret_key = os.urandom(24)
 DATABASE = 'qrcodes.db'
 
 def get_db():
@@ -24,13 +22,11 @@ def get_db():
     return db
 
 def init_db():
-    db_file = 'qrcodes.db'
     max_attempts = 5
     attempt = 0
-
     while attempt < max_attempts:
         try:
-            with sqlite3.connect(db_file) as conn:
+            with sqlite3.connect(DATABASE) as conn:
                 c = conn.cursor()
                 c.execute('''CREATE TABLE IF NOT EXISTS qrcodes
                              (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, scanned BOOLEAN)''')
@@ -41,47 +37,36 @@ def init_db():
         except sqlite3.DatabaseError:
             print(f"Tentative {attempt + 1}: La base de données est corrompue. Tentative de suppression...")
             try:
-                conn.close()
-            except:
-                pass
-            try:
-                os.remove(db_file)
-                print(f"Fichier {db_file} supprimé avec succès.")
-            except PermissionError:
-                print(f"Impossible de supprimer {db_file}. Fichier verrouillé.")
-            except FileNotFoundError:
-                print(f"Le fichier {db_file} n'existe pas.")
-            
+                os.remove(DATABASE)
+                print(f"Fichier {DATABASE} supprimé avec succès.")
+            except (PermissionError, FileNotFoundError) as e:
+                print(f"Erreur lors de la suppression du fichier : {e}")
+            time.sleep(1)
         attempt += 1
-        time.sleep(1)
     
     print("Impossible d'initialiser la base de données après plusieurs tentatives.")
     raise Exception("Échec de l'initialisation de la base de données")
 
 init_db()
 
-
 # Chemin pour sauvegarder les images QR
 QR_CODES_FOLDER = os.path.join(os.getcwd(), 'static', 'qrcodes')
 if not os.path.exists(QR_CODES_FOLDER):
     os.makedirs(QR_CODES_FOLDER)
 
-
-def nom_exist(nom):
+def qr_code_exists(nom):
     with sqlite3.connect(DATABASE) as conn:
         c = conn.cursor()
         c.execute("SELECT * FROM qrcodes WHERE name = ?", (nom,))
         return c.fetchone() is not None
 
-
 @app.route('/generer_qr', methods=['POST'])
 def generer_qr():
     nom = request.form['nom'].strip().upper()
-    
-    if nom_exist(nom):
+    if qr_code_exists(nom):
         return jsonify({"error": "Ce nom est déjà enregistré."}), 400
     
-    with sqlite3.connect('qrcodes.db') as conn:
+    with sqlite3.connect(DATABASE) as conn:
         c = conn.cursor()
         c.execute("INSERT INTO qrcodes (name, scanned) VALUES (?, ?)", (nom, False))
         qr_id = c.lastrowid
@@ -91,12 +76,8 @@ def generer_qr():
     qr.add_data(qr_data)
     qr.make(fit=True)
     img = qr.make_image(fill_color="black", back_color="white")
-    QR_CODES_FOLDER = os.path.join(os.getcwd(), 'static', 'qrcodes')
-    if not os.path.exists(QR_CODES_FOLDER):
-        os.makedirs(QR_CODES_FOLDER)
     qr_image_path = os.path.join(QR_CODES_FOLDER, f'{qr_id}.png')
     img.save(qr_image_path)
-    
 
     return jsonify({
         "success": True,
@@ -104,14 +85,10 @@ def generer_qr():
         "qr_code": f"/qr_image/{qr_id}"
     }), 200
 
-
-
 @app.route('/scanner_qr_camera', methods=['POST'])
 def scanner_qr_camera():
     data = request.json
     return process_qr_data(data['qr_data'])
-
-
 
 def process_qr_data(qr_data):
     try:
@@ -119,7 +96,7 @@ def process_qr_data(qr_data):
         qr_id = qr_info["id"]
         nom = qr_info["name"]
         
-        with sqlite3.connect('qrcodes.db') as conn:
+        with sqlite3.connect(DATABASE) as conn:
             c = conn.cursor()
             c.execute("SELECT * FROM qrcodes WHERE id = ?", (qr_id,))
             qr_db_data = c.fetchone()
@@ -127,27 +104,25 @@ def process_qr_data(qr_data):
             if qr_db_data:
                 if not qr_db_data[2]:  # Si pas encore scanné
                     c.execute("UPDATE qrcodes SET scanned = TRUE WHERE id = ?", (qr_id,))
-                    return f"{nom} est marqué présent"
+                    return jsonify({"message": f"{nom} est marqué présent"})
                 else:
-                    return f"{nom} est deja present"
+                    return jsonify({"message": f"{nom} est déjà présent"})
             else:
-                return "Code QR non reconnu dans la base de données."
+                return jsonify({"error": "Code QR non reconnu dans la base de données."}), 404
     except json.JSONDecodeError:
-        return "QR code invalide : données non conformes"
+        return jsonify({"error": "QR code invalide : données non conformes"}), 400
     except KeyError:
-        return "QR code invalide : informations manquantes"
-
+        return jsonify({"error": "QR code invalide : informations manquantes"}), 400
 
 @app.route('/qr_image/<int:qr_id>')
 def afficher_qr(qr_id):
     qr_image_path = os.path.join(QR_CODES_FOLDER, f'{qr_id}.png')
-    
     if os.path.exists(qr_image_path):
         return send_file(qr_image_path, mimetype='image/png')
     else:
-        return "QR code introuvable", 404
+        return jsonify({"error": "QR code introuvable"}), 404
 
-
+# Autres routes et fonctions...
 @app.route('/view_db')
 def view_db():
     try:
@@ -307,6 +282,6 @@ def home():
 
 
 
+
 if __name__ == '__main__':
-    # Ajouter un utilisateur par programmation
     app.run(debug=True, host='0.0.0.0', port=5000)
